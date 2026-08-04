@@ -1,2 +1,9 @@
 fastapi
 uvicorn[standard]
+sqlalchemy
+psycopg2-binary
+python-dotenv
+authlib
+pyjwt
+itsdangerous
+httpx
