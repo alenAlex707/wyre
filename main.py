@@ -1,4 +1,3 @@
-import json
 import os
 
 from dotenv import load_dotenv
@@ -10,6 +9,7 @@ from starlette.requests import Request
 from auth import GOOGLE_REDIRECT_URI, create_jwt, oauth, verify_jwt
 from database import Base, engine, get_db
 from models import User
+from protocol import MSG_CHAT, MSG_ERROR, pack_message, unpack_message
 
 load_dotenv()
 
@@ -91,30 +91,43 @@ def get_me(authorization: str | None = Header(default=None), db: Session = Depen
     return {"email": user.email, "name": user.name}
 
 
-@app.websocket("/ws/{user_id}")
-async def websocket_endpoint(websocket: WebSocket, user_id: str):
+@app.websocket("/ws")
+async def websocket_endpoint(websocket: WebSocket):
+    token = websocket.query_params.get("token")
+    if token is None:
+        await websocket.close(code=1008)
+        return
+
+    try:
+        user_id = str(verify_jwt(token))
+    except HTTPException:
+        await websocket.close(code=1008)
+        return
+
     await websocket.accept()
     active_connections[user_id] = websocket
     print(f"{user_id} connected")
     try:
         while True:
-            raw = await websocket.receive_text()
+            raw = await websocket.receive_bytes()
             try:
-                data = json.loads(raw)
+                _, data = unpack_message(raw)
                 recipient_id = data["to"]
                 content = data["content"]
-            except (json.JSONDecodeError, KeyError, TypeError):
-                await websocket.send_text(json.dumps({"error": "invalid message format"}))
+            except (ValueError, KeyError, TypeError):
+                await websocket.send_bytes(
+                    pack_message(MSG_ERROR, {"error": "invalid message format"})
+                )
                 continue
 
             recipient = active_connections.get(recipient_id)
             if recipient is not None:
-                await recipient.send_text(
-                    json.dumps({"from": user_id, "content": content})
+                await recipient.send_bytes(
+                    pack_message(MSG_CHAT, {"from": user_id, "content": content})
                 )
             else:
-                await websocket.send_text(
-                    json.dumps({"error": f"{recipient_id} is not online"})
+                await websocket.send_bytes(
+                    pack_message(MSG_ERROR, {"error": f"{recipient_id} is not online"})
                 )
     except WebSocketDisconnect:
         del active_connections[user_id]
