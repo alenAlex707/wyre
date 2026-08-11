@@ -2,14 +2,17 @@ import os
 
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+from sqlalchemy import and_, or_
 from sqlalchemy.orm import Session
 from starlette.middleware.sessions import SessionMiddleware
 from starlette.requests import Request
 
 from auth import GOOGLE_REDIRECT_URI, create_jwt, oauth, verify_jwt
-from crypto_utils import generate_rsa_keypair
+from crypto_utils import generate_aes_key, generate_rsa_keypair, rsa_encrypt
 from database import Base, engine, get_db
-from models import User
+from models import Conversation, User
 from protocol import MSG_CHAT, MSG_ERROR, pack_message, unpack_message
 
 load_dotenv()
@@ -18,9 +21,20 @@ SESSION_SECRET = os.getenv("SESSION_SECRET")
 
 app = FastAPI(title="wyre")
 app.add_middleware(SessionMiddleware, secret_key=SESSION_SECRET)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 active_connections: dict[str, WebSocket] = {}
 
 Base.metadata.create_all(bind=engine)
+
+
+class StartConversationRequest(BaseModel):
+    other_user_id: int
 
 
 @app.get("/")
@@ -97,6 +111,65 @@ def get_me(authorization: str | None = Header(default=None), db: Session = Depen
         raise HTTPException(status_code=401, detail="User not found")
 
     return {"email": user.email, "name": user.name}
+
+
+@app.post("/conversations/start")
+def start_conversation(
+    body: StartConversationRequest,
+    authorization: str | None = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    if authorization is None or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Not authenticated")
+
+    token = authorization.removeprefix("Bearer ")
+    user_id = verify_jwt(token)
+
+    current_user = db.query(User).filter(User.id == user_id).first()
+    if current_user is None:
+        raise HTTPException(status_code=401, detail="User not found")
+
+    other_user = db.query(User).filter(User.id == body.other_user_id).first()
+    if other_user is None:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    existing = (
+        db.query(Conversation)
+        .filter(
+            or_(
+                and_(
+                    Conversation.user_a_id == user_id,
+                    Conversation.user_b_id == body.other_user_id,
+                ),
+                and_(
+                    Conversation.user_a_id == body.other_user_id,
+                    Conversation.user_b_id == user_id,
+                ),
+            )
+        )
+        .first()
+    )
+    if existing is not None:
+        return {"conversation_id": existing.id}
+
+    aes_key = generate_aes_key()
+
+    # The same shared AES key is encrypted twice — once per participant's public
+    # key — because only that user's matching private key can unwrap their copy.
+    encrypted_key_for_a = rsa_encrypt(current_user.public_key, aes_key)
+    encrypted_key_for_b = rsa_encrypt(other_user.public_key, aes_key)
+
+    conversation = Conversation(
+        user_a_id=user_id,
+        user_b_id=body.other_user_id,
+        encrypted_key_for_a=encrypted_key_for_a,
+        encrypted_key_for_b=encrypted_key_for_b,
+    )
+    db.add(conversation)
+    db.commit()
+    db.refresh(conversation)
+
+    return {"conversation_id": conversation.id}
 
 
 @app.websocket("/ws")
