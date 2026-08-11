@@ -7,6 +7,7 @@ from starlette.middleware.sessions import SessionMiddleware
 from starlette.requests import Request
 
 from auth import GOOGLE_REDIRECT_URI, create_jwt, oauth, verify_jwt
+from crypto_utils import generate_rsa_keypair
 from database import Base, engine, get_db
 from models import User
 from protocol import MSG_CHAT, MSG_ERROR, pack_message, unpack_message
@@ -67,7 +68,14 @@ async def auth_callback(request: Request, db: Session = Depends(get_db)):
 
     user = db.query(User).filter(User.google_id == google_id).first()
     if user is None:
-        user = User(email=email, name=name, google_id=google_id)
+        private_key_pem, public_key_pem = generate_rsa_keypair()
+        user = User(
+            email=email,
+            name=name,
+            google_id=google_id,
+            public_key=public_key_pem,
+            private_key=private_key_pem,
+        )
         db.add(user)
         db.commit()
         db.refresh(user)

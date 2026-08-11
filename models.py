@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import Column, DateTime, Integer, String
+from sqlalchemy import Column, DateTime, Integer, String, Text
 
 from database import Base
 
@@ -12,4 +12,6 @@ class User(Base):
     email = Column(String, unique=True, nullable=False)
     name = Column(String, nullable=True)
     google_id = Column(String, unique=True, nullable=True)
+    public_key = Column(Text, nullable=True)
+    private_key = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
